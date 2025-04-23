@@ -1,7 +1,4 @@
-//Name: Brayden Aubry
-//Class: CMPSC 311
-//Assignment: Project (Client Side)
-//Date: IDK
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +6,15 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <gtk/gtk.h>
 
 // server connection details
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
 #define MAX_MSG_LEN 1024
+
+// application details
+#define APP_NAME "Chat App"
 
 int sockfd; // socket file descriptor
 
@@ -38,6 +39,32 @@ void* receive_messages(void* arg) {
     return NULL;
 }
 
+// sets up the app when its activated (started)
+static void on_activate(GtkApplication *app, gpointer user_data)
+{
+    GtkWidget *window = gtk_application_window_new(app);
+    gtk_window_set_default_size(GTK_WINDOW(window), 900, 800);
+    gtk_window_set_title(GTK_WINDOW(window), APP_NAME);
+    gtk_window_present(GTK_WINDOW(window));
+
+    // login screen code - GTK
+    GtkWidget *button;
+    GtkWidget *box;
+    GtkWidget *entry;
+
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0); // button allignment
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+    gtk_window_set_child(GTK_WINDOW(window), box);
+
+    entry = gtk_entry_new();
+
+    button = gtk_button_new_with_label("Login");
+    g_signal_connect(button, "clicked", G_CALLBACK(button_test), entry);
+
+    gtk_box_append(GTK_BOX(box), button);
+}
+
 int main() {
     struct sockaddr_in server_addr;
     char message[MAX_MSG_LEN];
@@ -55,6 +82,22 @@ int main() {
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(SERVER_PORT);
     server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+
+
+
+
+    // set up app window
+    GtkApplication *app;
+
+    app = gtk_application_new(NULL, G_APPLICATION_DEFAULT_FLAGS);
+    g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL); // app is set up in the on_activate function
+    g_application_run(G_APPLICATION(app), 0, NULL);
+    g_object_unref(app);
+
+
+
+
 
     // connect to server
     if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
@@ -83,4 +126,3 @@ int main() {
 
     return 0;
 }
-
