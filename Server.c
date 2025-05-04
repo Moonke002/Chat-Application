@@ -1,17 +1,11 @@
 /*
-File: Server Class
-Date: 04/15/2025
-*/
-
-/*
-File: Server
+File: Server_Combined Class
 Date: 04/15/2025
 */
 
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    #include <windows.h>  // for WinMain types
     typedef int socklen_t;
 #else
     #include <arpa/inet.h>
@@ -28,14 +22,15 @@ Date: 04/15/2025
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <signal.h>
 
-#define SERVER_IP "127.0.0.1"
 #define PORT 8080
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 
 typedef struct {
-    SOCKET socket;
+    int socket;
     struct sockaddr_in address;
     pthread_t thread;
     char username[50];
@@ -43,101 +38,37 @@ typedef struct {
 
 Client *clients[MAX_CLIENTS];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+int server_socket; // global for signal handler
 
-void broadcast_message(char *message, SOCKET sender_socket);
-void remove_client(SOCKET socket);
-void *handle_client(void *arg);
-void handle_new_client(SOCKET client_socket, struct sockaddr_in client_addr);
-
-void handle_new_client(SOCKET client_socket, struct sockaddr_in client_addr) {
-    char username[50];
-    recv(client_socket, username, sizeof(username), 0);
-    username[strcspn(username, "\n")] = 0;
-
-    Client *new_client = (Client *)malloc(sizeof(Client));
-    if (!new_client) {
-        perror("failed to allocate memory");
-        return;
-    }
-
-    new_client->socket = client_socket;
-    new_client->address = client_addr;
-    strcpy(new_client->username, username);
-
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (!clients[i]) {
-            clients[i] = new_client;
-            pthread_create(&new_client->thread, NULL, handle_client, (void *)new_client);
-            pthread_mutex_unlock(&clients_mutex);
-            return;
-        }
-    }
-    pthread_mutex_unlock(&clients_mutex);
-    send(client_socket, "server full. try again later.\n", 32, 0);
-
-#ifdef _WIN32
-    closesocket(client_socket);
-#else
-    close(client_socket);
-#endif
-
-    free(new_client);
+//Adds timestamps when the Server updates
+void timestamp_log(const char *msg) {
+    time_t now = time(NULL);
+    char tbuf[26];
+    strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    printf("[%s] %s\n", tbuf, msg);
 }
 
-void *handle_client(void *arg) {
-    Client *client = (Client *)arg;
-    char buffer[BUFFER_SIZE];
-    int bytes_received;
-
-    while ((bytes_received = recv(client->socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        buffer[bytes_received] = '\0';
-        printf("%s: %s", client->username, buffer);
-        broadcast_message(buffer, client->socket);
-    }
-
-    remove_client(client->socket);
-    free(client);
-    pthread_exit(NULL);
-    return NULL; // to avoid compiler warning
-}
-
-void broadcast_message(char *message, SOCKET sender_socket) {
+//Sends message to all connected clients
+void broadcast_message(const char *message, int sender_socket) {
     pthread_mutex_lock(&clients_mutex);
-
-    // find sender's username
-    char sender_name[50] = "unknown";
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i] && clients[i]->socket == sender_socket) {
-            strcpy(sender_name, clients[i]->username);
-            break;
-        }
-    }
-
-    // format message with username
-    char full_message[BUFFER_SIZE + 100];
-    snprintf(full_message, sizeof(full_message), "%s: %s", sender_name, message);
-
-    // send to all clients except the sender
-    for (int i = 0; i < MAX_CLIENTS; i++) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (clients[i] && clients[i]->socket != sender_socket) {
-            send(clients[i]->socket, full_message, strlen(full_message), 0);
+            send(clients[i]->socket, message, strlen(message), MSG_NOSIGNAL);
         }
     }
-
     pthread_mutex_unlock(&clients_mutex);
 }
 
-
-void remove_client(SOCKET socket) {
+//Removes a disconnected client from the list
+void remove_client(int socket) {
     pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (clients[i] && clients[i]->socket == socket) {
-#ifdef _WIN32
-            closesocket(socket);
-#else
-            close(socket);
-#endif
+            char msg[100];
+            snprintf(msg, sizeof(msg), "%s has left the chat.", clients[i]->username);
+            timestamp_log(msg);
+            close(clients[i]->socket);
+            free(clients[i]);
             clients[i] = NULL;
             break;
         }
@@ -145,54 +76,155 @@ void remove_client(SOCKET socket) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
-int main() {
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        printf("winsock init failed. error code: %d\n", WSAGetLastError());
-        return 1;
-    }
-#endif
+//Handles messages from individual clients
+void *handle_client(void *arg) {
+    Client *cli = (Client *)arg;
+    char buffer[BUFFER_SIZE];
+    char message[BUFFER_SIZE + 100];
 
-    SOCKET server_socket, client_socket;
+    snprintf(message, sizeof(message), "%s has joined the chat.\n", cli->username);
+    broadcast_message(message, cli->socket);
+    timestamp_log(message);
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int bytes_received = recv(cli->socket, buffer, BUFFER_SIZE, 0);
+        if (bytes_received <= 0) {
+            break;
+        }
+
+        buffer[strcspn(buffer, "\n")] = 0;
+        snprintf(message, sizeof(message), "%s: %s\n", cli->username, buffer);
+        broadcast_message(message, cli->socket);
+    }
+
+    remove_client(cli->socket);
+    pthread_detach(pthread_self());
+    return NULL;
+}
+
+//Verifies the username received from the client is not already in use
+int is_username_unique(const char *username) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i] && strcmp(clients[i]->username, username) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+//Handles new client connections
+void handle_new_client(int client_socket, struct sockaddr_in client_addr) {
+    char username[50] = {0};
+    if (recv(client_socket, username, sizeof(username), 0) <= 0) {
+        close(client_socket);
+        return;
+    }
+
+    username[strcspn(username, "\n")] = 0;
+
+
+    pthread_mutex_lock(&clients_mutex);
+    if (!is_username_unique(username)) {
+        send(client_socket, "Username already taken.\n", 25, 0);
+        close(client_socket);
+        pthread_mutex_unlock(&clients_mutex);
+        return;
+    }
+
+
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (!clients[i]) {
+            Client *new_client = (Client *)malloc(sizeof(Client));
+            new_client->socket = client_socket;
+            new_client->address = client_addr;
+            strncpy(new_client->username, username, sizeof(new_client->username) - 1);
+            clients[i] = new_client;
+
+            pthread_create(&new_client->thread, NULL, handle_client, (void *)new_client);
+
+            char logmsg[100];
+            snprintf(logmsg, sizeof(logmsg), "New connection from %s:%d as %s.",
+                     inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), username);
+            timestamp_log(logmsg);
+
+            pthread_mutex_unlock(&clients_mutex);
+            return;
+        }
+    }
+
+    send(client_socket, "Server full. Try again later.\n", 31, 0);
+    close(client_socket);
+    pthread_mutex_unlock(&clients_mutex);
+}
+
+//safely shuts the server down when the window is disconnected
+void cleanup_server(int signo) {
+    timestamp_log("Server shutting down...");
+
+    /*
+    if(signo == SIGINT) {
+        pthread_mutex_lock(&clients_mutex);
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i]) {
+                close(clients[i]->socket);
+                free(clients[i]);
+                clients[i] = NULL;
+            }
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);*/
+
+    close(server_socket);
+    exit(0);
+}
+
+//Main function
+int main() {
     struct sockaddr_in server_addr, client_addr;
-    socklen_t addr_size;
+    socklen_t addr_len = sizeof(client_addr);
+
+    if (signal(SIGINT, cleanup_server) == SIG_ERR) { //Ctrl+c handler
+        fprintf(stderr, "Error with SIGINT\n");
+        exit(-1);
+    }
 
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == INVALID_SOCKET) {
-        perror("socket creation failed");
-        exit(EXIT_FAILURE);
+    if (server_socket < 0) {
+        perror("Socket creation failed");
+        return EXIT_FAILURE;
     }
+
+    int opt = 1;
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
+        perror("Binding failed");
+        close(server_socket);
+        return EXIT_FAILURE;
     }
 
     if (listen(server_socket, MAX_CLIENTS) < 0) {
-        perror("listen failed");
-        exit(EXIT_FAILURE);
+        perror("Listening failed");
+        close(server_socket);
+        return EXIT_FAILURE;
     }
 
-    printf("server started on port %d\n", PORT);
+    timestamp_log("Server started.");
 
     while (1) {
-        addr_size = sizeof(client_addr);
-        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addr_size);
-        if (client_socket == INVALID_SOCKET) {
-            perror("connection failed");
+        int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_socket < 0) {
+            perror("Accept failed");
             continue;
         }
+
         handle_new_client(client_socket, client_addr);
     }
-
-#ifdef _WIN32
-    WSACleanup();
-#endif
 
     return 0;
 }
