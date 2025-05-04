@@ -1,8 +1,3 @@
-/*
-File: Server_Combined Class
-Date: 04/15/2025
-*/
-
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
